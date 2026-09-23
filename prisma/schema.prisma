@@ -1,0 +1,407 @@
+// =============================================================================
+// Tontine — schéma de données (Prisma 7.10, MariaDB 11.8)
+// SOURCE UNIQUE DE VÉRITÉ. schema.sql en est dérivé : ne jamais l'éditer à la main.
+//   Régénération : npm run db:sql
+//
+// Conventions :
+//   - Montants en FCFA, entiers (INT). Pas de DECIMAL : le FCFA n'a pas de subdivision.
+//   - Dates stockées en UTC. Conversion Africa/Libreville à l'affichage uniquement.
+//   - Aucune suppression physique des données financières (onDelete: Restrict).
+//     Une tontine s'annule (status CANCELLED), elle ne se supprime pas.
+//   - Modèle A : la plateforme ne détient aucun fonds. Elle enregistre des
+//     déclarations de paiement validées par le trésorier.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+// -----------------------------------------------------------------------------
+// Enums
+// -----------------------------------------------------------------------------
+
+enum PlatformRole {
+  USER
+  ADMIN // toi : valide les factures d'abonnement
+}
+
+enum Frequency {
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+}
+
+enum PayoutMode {
+  DRAW           // ordre tiré au sort une seule fois, à l'activation (graine conservée)
+  MANUAL         // ordre fixé par le trésorier (glisser-déposer), gelé à l'activation
+}
+
+enum TontineStatus {
+  DRAFT     // constitution : ajout des membres, réglages modifiables
+  ACTIVE    // tours générés, réglages gelés
+  COMPLETED // tous les tours PAID_OUT
+  CANCELLED
+}
+
+enum MemberRole {
+  PRESIDENT
+  TREASURER
+  MEMBER
+}
+
+enum CycleStatus {
+  PENDING         // tour futur
+  COLLECTING      // tour ouvert, cotisations attendues
+  PAYOUT_DECLARED // le trésorier déclare avoir remis la cagnotte
+  PAID_OUT        // le bénéficiaire a confirmé la réception
+}
+
+enum ContributionStatus {
+  PENDING // rien de validé
+  PARTIAL // validé < dû
+  PAID    // validé >= dû (+ pénalité éventuelle)
+  // Le retard n'est PAS un statut : il se calcule (échéance dépassée et statut != PAID).
+}
+
+enum PaymentMethod {
+  AIRTEL_MONEY
+  MOOV_MONEY
+  CASH
+  BANK_TRANSFER
+}
+
+enum DeclarationStatus {
+  DECLARED  // saisie par le membre (ou le trésorier pour lui), en attente
+  VALIDATED // confirmée par le trésorier
+  REJECTED  // refusée ; peut être corrigée puis re-soumise (même ligne)
+}
+
+enum ReminderKind {
+  DUE_SOON            // échéance dans moins de 24 h
+  OVERDUE             // en retard (sequence = 1, 2, 3… selon le palier)
+  PAYOUT_CONFIRMATION // demande au bénéficiaire de confirmer la réception
+}
+
+enum ReminderChannel {
+  WHATSAPP_API  // envoi automatique (WhatsApp Cloud API, quand configurée)
+  WHATSAPP_LINK // relance en un clic par le trésorier (lien wa.me), coût nul
+  SMS
+}
+
+enum ReminderStatus {
+  QUEUED
+  SENT
+  FAILED
+  CANCELLED // devenue sans objet (cotisation payée entre-temps)
+}
+
+enum InvoiceStatus {
+  DUE
+  DECLARED
+  PAID
+  WAIVED
+}
+
+// -----------------------------------------------------------------------------
+// Authentification (Better Auth 1.7 + plugin phoneNumber)
+// Champs requis par Better Auth conservés tels quels (name, email, image…).
+// -----------------------------------------------------------------------------
+
+model User {
+  id                  String       @id @default(uuid()) @db.VarChar(36)
+  name                String       @db.VarChar(100) // nom complet affiché
+  email               String       @unique @db.VarChar(191) // technique : <tel>@phone.invalid (exigé par Better Auth)
+  emailVerified       Boolean      @default(false)
+  image               String?      @db.Text // avatarUrl
+  phoneNumber         String       @unique @db.VarChar(20) // E.164, ex. +24177123456
+  phoneNumberVerified Boolean      @default(false)
+  platformRole        PlatformRole @default(USER)
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  sessions Session[]
+  accounts Account[]
+
+  tontinesCreated      Tontine[]             @relation("TontineCreatedBy")
+  memberships          TontineMember[]
+  declarationsMade     PaymentDeclaration[]  @relation("DeclarationDeclaredBy")
+  declarationsReviewed PaymentDeclaration[]  @relation("DeclarationReviewedBy")
+  payoutsDeclared      Cycle[]               @relation("PayoutDeclaredBy")
+  invoicesValidated    SubscriptionInvoice[] @relation("InvoiceValidatedBy")
+  auditLogs            AuditLog[]
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.VarChar(36)
+  expiresAt DateTime
+  token     String   @unique @db.VarChar(191)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?  @db.Text
+  userAgent String?  @db.Text
+  userId    String   @db.VarChar(36)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id @default(uuid()) @db.VarChar(36)
+  accountId             String    @db.Text
+  providerId            String    @db.Text
+  userId                String    @db.VarChar(36)
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?   @db.Text
+  refreshToken          String?   @db.Text
+  idToken               String?   @db.Text
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?   @db.Text
+  password              String?   @db.Text
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+}
+
+// Stocke les OTP (identifier = numéro de téléphone).
+model Verification {
+  id         String   @id @default(uuid()) @db.VarChar(36)
+  identifier String   @db.Text
+  value      String   @db.Text
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier(length: 191)])
+  @@map("verification")
+}
+
+// -----------------------------------------------------------------------------
+// Métier
+// -----------------------------------------------------------------------------
+
+model Tontine {
+  id                     String        @id @default(uuid()) @db.VarChar(36)
+  name                   String        @db.VarChar(150)
+  contributionAmount     Int // FCFA par membre et par tour
+  currency               String        @default("XAF") @db.Char(3)
+  frequency              Frequency
+  startDate              DateTime      @db.Date // échéance du tour n°1 ; base du calcul des suivantes
+  timezone               String        @default("Africa/Libreville") @db.VarChar(50)
+  beneficiaryContributes Boolean       @default(true) // le bénéficiaire cotise-t-il à son propre tour ?
+  penaltyAmount          Int           @default(0)
+  penaltyGraceDays       Int           @default(0)
+  payoutMode             PayoutMode
+  drawSeed               String?       @db.VarChar(64) // DRAW : graine du tirage, pour le rejouer publiquement
+  drawAlgorithm          String?       @db.VarChar(30) // ex. "fisher-yates-sha256-v1"
+  drawnAt                DateTime?
+  status                 TontineStatus @default(DRAFT)
+  monthlyFee             Int           @default(5000) // prix SaaS contractuel de cette tontine
+  activatedAt            DateTime?
+  completedAt            DateTime?
+  cancelledAt            DateTime?
+  createdById            String        @db.VarChar(36)
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+
+  createdBy User                  @relation("TontineCreatedBy", fields: [createdById], references: [id])
+  members   TontineMember[]
+  cycles    Cycle[]
+  invoices  SubscriptionInvoice[]
+  auditLogs AuditLog[]
+
+  @@index([createdById])
+  @@index([status])
+  @@map("tontine")
+}
+
+// Une personne = une part. (Les tontines à parts multiples nécessiteraient
+// de séparer « membre » et « part » : hors périmètre v1.)
+model TontineMember {
+  id             String     @id @default(uuid()) @db.VarChar(36)
+  tontineId      String     @db.VarChar(36)
+  userId         String     @db.VarChar(36)
+  role           MemberRole @default(MEMBER)
+  payoutPosition Int? // null tant que l'ordre n'est pas fixé ; = numéro du tour reçu
+  joinedAt       DateTime   @default(now())
+
+  tontine             Tontine        @relation(fields: [tontineId], references: [id])
+  user                User           @relation(fields: [userId], references: [id])
+  contributions       Contribution[]
+  cyclesAsBeneficiary Cycle[]        @relation("CycleBeneficiary")
+  reminders           Reminder[]
+
+  @@unique([tontineId, userId])
+  @@unique([tontineId, payoutPosition])
+  @@index([userId])
+  @@map("tontine_member")
+}
+
+model Cycle {
+  id                  String         @id @default(uuid()) @db.VarChar(36)
+  tontineId           String         @db.VarChar(36)
+  cycleNumber         Int
+  dueDate             DateTime // UTC ; correspond à 23:59 heure locale du jour d'échéance
+  beneficiaryMemberId String         @db.VarChar(36)
+  totalExpected       Int
+  totalCollected      Int            @default(0) // somme des déclarations VALIDATED, maintenue en transaction
+  status              CycleStatus    @default(PENDING)
+  payoutAmount        Int?
+  payoutMethod        PaymentMethod?
+  payoutReference     String?        @db.VarChar(100)
+  payoutDeclaredAt    DateTime?
+  payoutDeclaredById  String?        @db.VarChar(36)
+  payoutConfirmedAt   DateTime? // confirmation par le bénéficiaire lui-même
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  tontine          Tontine        @relation(fields: [tontineId], references: [id])
+  beneficiary      TontineMember  @relation("CycleBeneficiary", fields: [beneficiaryMemberId], references: [id])
+  payoutDeclaredBy User?          @relation("PayoutDeclaredBy", fields: [payoutDeclaredById], references: [id])
+  contributions    Contribution[]
+  reminders        Reminder[]
+
+  @@unique([tontineId, cycleNumber])
+  @@unique([tontineId, beneficiaryMemberId])
+  @@unique([payoutMethod, payoutReference]) // une même transaction ne justifie pas deux remises
+  @@index([beneficiaryMemberId])
+  @@index([payoutDeclaredById])
+  @@index([status, dueDate]) // requêtes du cron
+  @@map("cycle")
+}
+
+// L'obligation : ce qu'un membre doit pour un tour.
+model Contribution {
+  id               String             @id @default(uuid()) @db.VarChar(36)
+  cycleId          String             @db.VarChar(36)
+  memberId         String             @db.VarChar(36)
+  amountDue        Int
+  penaltyAmount    Int                @default(0) // ajouté au dû quand la pénalité est appliquée
+  penaltyAppliedAt DateTime?
+  amountPaid       Int                @default(0) // somme des déclarations VALIDATED
+  status           ContributionStatus @default(PENDING)
+  paidAt           DateTime? // date à laquelle amountPaid a atteint amountDue + penaltyAmount
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  cycle        Cycle                @relation(fields: [cycleId], references: [id])
+  member       TontineMember        @relation(fields: [memberId], references: [id])
+  declarations PaymentDeclaration[]
+
+  @@unique([cycleId, memberId])
+  @@index([memberId])
+  @@index([status])
+  @@map("contribution")
+}
+
+// Les paiements : 0..n déclarations par obligation (paiements partiels possibles).
+model PaymentDeclaration {
+  id                String            @id @default(uuid()) @db.VarChar(36)
+  contributionId    String            @db.VarChar(36)
+  amount            Int
+  method            PaymentMethod
+  operatorReference String?           @db.VarChar(100) // ID de transaction du SMS Airtel/Moov ; null pour CASH
+  paidAt            DateTime // date du paiement selon le déclarant
+  note              String?           @db.VarChar(500)
+  status            DeclarationStatus @default(DECLARED)
+  declaredById      String            @db.VarChar(36) // le membre, ou le trésorier pour son compte
+  declaredAt        DateTime          @default(now())
+  reviewedById      String?           @db.VarChar(36)
+  reviewedAt        DateTime?
+  rejectionReason   String?           @db.VarChar(500)
+
+  contribution Contribution @relation(fields: [contributionId], references: [id])
+  declaredBy   User         @relation("DeclarationDeclaredBy", fields: [declaredById], references: [id])
+  reviewedBy   User?        @relation("DeclarationReviewedBy", fields: [reviewedById], references: [id])
+
+  // Anti-fraude : un même SMS de transaction ne peut justifier qu'un seul paiement,
+  // toutes tontines confondues. (MariaDB autorise plusieurs NULL : CASH non concerné.)
+  @@unique([method, operatorReference])
+  @@index([contributionId])
+  @@index([declaredById])
+  @@index([reviewedById])
+  @@index([status])
+  @@map("payment_declaration")
+}
+
+// Relances. L'unicité (tour, destinataire, type, palier) rend le cron idempotent :
+// exécuter le cron 24 fois n'envoie pas 24 messages.
+model Reminder {
+  id                String          @id @default(uuid()) @db.VarChar(36)
+  cycleId           String          @db.VarChar(36)
+  recipientMemberId String          @db.VarChar(36)
+  kind              ReminderKind
+  sequence          Int             @default(0) // 0 pour DUE_SOON ; 1, 2, 3… pour les paliers OVERDUE
+  channel           ReminderChannel
+  status            ReminderStatus  @default(QUEUED)
+  scheduledFor      DateTime
+  sentAt            DateTime?
+  attempts          Int             @default(0)
+  lastError         String?         @db.VarChar(500)
+  providerMessageId String?         @db.VarChar(100)
+  createdAt         DateTime        @default(now())
+
+  cycle     Cycle         @relation(fields: [cycleId], references: [id])
+  recipient TontineMember @relation(fields: [recipientMemberId], references: [id])
+
+  @@unique([cycleId, recipientMemberId, kind, sequence])
+  @@index([recipientMemberId])
+  @@index([status, scheduledFor])
+  @@map("reminder")
+}
+
+// Abonnement SaaS, encaissé hors plateforme (Mobile Money vers toi) puis validé par un ADMIN.
+model SubscriptionInvoice {
+  id                String         @id @default(uuid()) @db.VarChar(36)
+  tontineId         String         @db.VarChar(36)
+  periodStart       DateTime       @db.Date
+  periodEnd         DateTime       @db.Date
+  amount            Int
+  dueDate           DateTime       @db.Date
+  status            InvoiceStatus  @default(DUE)
+  method            PaymentMethod?
+  operatorReference String?        @db.VarChar(100)
+  declaredAt        DateTime?
+  paidAt            DateTime?
+  validatedById     String?        @db.VarChar(36)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  tontine     Tontine @relation(fields: [tontineId], references: [id])
+  validatedBy User?   @relation("InvoiceValidatedBy", fields: [validatedById], references: [id])
+
+  @@unique([tontineId, periodStart])
+  @@unique([method, operatorReference])
+  @@index([validatedById])
+  @@index([status, dueDate])
+  @@map("subscription_invoice")
+}
+
+// Journal append-only : aucune route de mise à jour ni de suppression.
+model AuditLog {
+  id            String   @id @default(uuid()) @db.VarChar(36)
+  tontineId     String   @db.VarChar(36)
+  action        String   @db.VarChar(100) // ex. "declaration.validated", "draw.performed"
+  entityType    String?  @db.VarChar(50)
+  entityId      String?  @db.VarChar(36)
+  performedById String?  @db.VarChar(36) // null = action système (cron)
+  details       Json?
+  createdAt     DateTime @default(now())
+
+  tontine     Tontine @relation(fields: [tontineId], references: [id])
+  performedBy User?   @relation(fields: [performedById], references: [id])
+
+  @@index([tontineId, createdAt])
+  @@index([performedById])
+  @@map("audit_log")
+}
