@@ -7,7 +7,12 @@ import { sendOtp } from "./otp";
 
 export const auth = betterAuth({
   database: prismaAdapter(prisma, { provider: "mysql" }),
-  advanced: { database: { generateId: "uuid" } },
+  advanced: {
+    database: { generateId: "uuid" }, // cohérent avec VARCHAR(36)
+    // Chez Hostinger, X-Real-IP contient une seule adresse (X-Forwarded-For en contient 3).
+    // /api/health (administrateur) permet de vérifier qu'il s'agit bien de l'adresse du visiteur.
+    ipAddress: { ipAddressHeaders: ["x-real-ip"] },
+  },
   session: { expiresIn: 60 * 60 * 24 * 30 },
   plugins: [
     phoneNumber({
