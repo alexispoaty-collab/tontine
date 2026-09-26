@@ -2,8 +2,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth-client";
+import { normalizePhone } from "@/lib/phone";
 
-const clean = (p: string) => { let v = p.replace(/[\s.\-()]/g, ""); if (v.startsWith("00")) v = "+" + v.slice(2); return v; };
 
 export default function Connexion() {
   const router = useRouter();
@@ -14,15 +14,18 @@ export default function Connexion() {
   const [busy, setBusy] = useState(false);
 
   async function sendCode(e: React.FormEvent) {
-    e.preventDefault(); setError(null); setBusy(true);
-    const { error } = await authClient.phoneNumber.sendOtp({ phoneNumber: clean(phone) });
+    e.preventDefault(); setError(null);
+    const n = normalizePhone(phone);
+    if (!n) return setError("Numéro invalide. Exemple attendu : +241 77 12 34 56.");
+    setPhone(n); setBusy(true);
+    const { error } = await authClient.phoneNumber.sendOtp({ phoneNumber: n });
     setBusy(false);
-    if (error) return setError("Numéro invalide ou envoi impossible. Vérifiez le format : +241 suivi de votre numéro.");
+    if (error) return setError("Envoi du code impossible. Réessayez dans un instant.");
     setStep("code");
   }
   async function verify(e: React.FormEvent) {
     e.preventDefault(); setError(null); setBusy(true);
-    const { error } = await authClient.phoneNumber.verify({ phoneNumber: clean(phone), code: code.trim() });
+    const { error } = await authClient.phoneNumber.verify({ phoneNumber: phone, code: code.trim() });
     setBusy(false);
     if (error) return setError("Code incorrect ou expiré. Demandez un nouveau code.");
     router.replace("/tontines"); router.refresh();

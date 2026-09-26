@@ -1,8 +1,9 @@
 "use client";
-import { useActionState, type ReactNode } from "react";
+import { useActionState, useEffect, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import { useFormStatus } from "react-dom";
 
-export type ActionResult = { ok: boolean; message?: string } | null;
+export type ActionResult = { ok: boolean; message?: string; redirectTo?: string } | null;
 type Action = (prev: ActionResult, formData: FormData) => Promise<ActionResult>;
 
 function Submit({ children, tone }: { children: ReactNode; tone: "primary" | "quiet" | "danger" }) {
@@ -19,6 +20,10 @@ export function ActionForm({ action, submit, tone = "primary", children, classNa
   action: Action; submit: ReactNode; tone?: "primary" | "quiet" | "danger"; children?: ReactNode; className?: string;
 }) {
   const [state, formAction] = useActionState(action, null);
+  const router = useRouter();
+  // Redirection faite dans le navigateur : un redirect() côté serveur déclenche chez Hostinger
+  // un appel interne du serveur vers lui-même, qui échoue (« failed to get redirect response »).
+  useEffect(() => { if (state?.ok && state.redirectTo) router.push(state.redirectTo); }, [state, router]);
   return (
     <form action={formAction} className={`form ${className}`}>
       {children}

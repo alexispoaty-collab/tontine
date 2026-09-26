@@ -1,6 +1,5 @@
 "use server";
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { requireUser } from "@/server/session";
 import { DomainError } from "@/server/errors";
@@ -42,7 +41,6 @@ export async function updateNameAction(_: ActionResult, f: FormData) {
 
 export async function createTontineAction(_: ActionResult, f: FormData): Promise<ActionResult> {
   const user = await requireUser();
-  let id: string;
   try {
     const t = await createTontine(prisma, {
       actorUserId: user.id, name: s(f, "name"), contributionAmount: int(f, "amount"),
@@ -50,13 +48,13 @@ export async function createTontineAction(_: ActionResult, f: FormData): Promise
       payoutMode: s(f, "payoutMode") as PayoutMode, beneficiaryContributes: f.get("beneficiaryContributes") === "on",
       penaltyAmount: int(f, "penaltyAmount"), penaltyGraceDays: int(f, "penaltyGraceDays"),
     });
-    id = t.id;
+    revalidatePath("/tontines");
+    return { ok: true, message: "Tontine créée.", redirectTo: `/tontines/${t.id}` };
   } catch (e) {
     if (e instanceof DomainError) return { ok: false, message: e.message };
     console.error("[action]", e);
     return { ok: false, message: "Erreur inattendue. Réessayez dans un instant." };
   }
-  redirect(`/tontines/${id}`);
 }
 
 export async function addMemberAction(_: ActionResult, f: FormData) {
@@ -83,7 +81,7 @@ export async function moveMemberAction(_: ActionResult, f: FormData) {
     const to = s(f, "direction") === "up" ? from - 1 : from + 1;
     if (from >= 0 && to >= 0 && to < ids.length) [ids[from], ids[to]] = [ids[to], ids[from]];
     await setManualOrder(prisma, { tontineId: tid, actorUserId: uid, orderedMemberIds: ids });
-    return "Ordre enregistré.";
+    return "Ordre enregistré. Le président peut maintenant activer la tontine.";
   });
 }
 export async function initOrderAction(_: ActionResult, f: FormData) {
@@ -91,7 +89,7 @@ export async function initOrderAction(_: ActionResult, f: FormData) {
   return run(tid, async (uid) => {
     const members = await prisma.tontineMember.findMany({ where: { tontineId: tid }, orderBy: { joinedAt: "asc" } });
     await setManualOrder(prisma, { tontineId: tid, actorUserId: uid, orderedMemberIds: members.map((m) => m.id) });
-    return "Ordre initialisé : ajustez-le avec les flèches.";
+    return "Ordre enregistré dans l'ordre d'arrivée. Ajustez-le avec les flèches : chaque changement est enregistré aussitôt.";
   });
 }
 export async function activateAction(_: ActionResult, f: FormData) {

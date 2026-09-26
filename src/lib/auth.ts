@@ -2,7 +2,7 @@ import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { phoneNumber } from "better-auth/plugins";
 import { prisma } from "./db";
-import { tempEmailFor } from "./phone";
+import { tempEmailFor, isNormalizedPhone } from "./phone";
 import { sendOtp } from "./otp";
 
 export const auth = betterAuth({
@@ -14,7 +14,7 @@ export const auth = betterAuth({
       otpLength: 6,
       expiresIn: 300,
       allowedAttempts: 3,
-      phoneNumberValidator: (p) => /^\+[1-9]\d{7,14}$/.test(p),
+      phoneNumberValidator: (p) => isNormalizedPhone(p), // la page de connexion normalise avant envoi
       sendOTP: ({ phoneNumber, code }) => {
         void sendOtp(phoneNumber, code);
       },

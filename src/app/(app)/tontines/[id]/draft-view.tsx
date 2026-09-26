@@ -32,6 +32,14 @@ export function DraftView({ tontine: t, me }: { tontine: Tontine & { members: M[
             ? <ActionForm action={initOrderAction} submit="Fixer l'ordre de passage" tone="quiet" className="mb">{hid}</ActionForm>
             : <p className="small muted" style={{ marginBottom: "0.5rem" }}>L'ordre de passage sera fixé par le trésorier.</p>
         )}
+        {manual && ordered && (
+          <p className="small muted" style={{ marginBottom: "0.5rem" }}>
+            {isTreasurer
+              ? "Ordre enregistré. Chaque flèche l'enregistre aussitôt, aucune validation n'est nécessaire."
+              : "Ordre fixé par le trésorier."}
+            {isPresident && hasTreasurer ? " Vous pouvez activer la tontine en bas de page." : ""}
+          </p>
+        )}
         {!manual && <p className="small muted" style={{ marginBottom: "0.5rem" }}>L'ordre sera tiré au sort à l'activation. Le tirage pourra être rejoué pour vérification.</p>}
         <ol className="rows">
           {t.members.map((m, i) => (

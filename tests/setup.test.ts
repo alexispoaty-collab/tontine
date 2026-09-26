@@ -9,10 +9,20 @@ before(resetDb);
 after(() => db.$disconnect());
 const base = { contributionAmount: 25000, frequency: "MONTHLY" as const, startDate: "2031-03-31", payoutMode: "MANUAL" as const, beneficiaryContributes: true, penaltyAmount: 0, penaltyGraceDays: 0 };
 
-test("numéros : format international exigé, espaces tolérés, 00 converti", () => {
-  assert.equal(normalizePhone("+241 77 12 34 56"), "+24177123456");
-  assert.equal(normalizePhone("0024177123456"), "+24177123456");
-  assert.throws(() => normalizePhone("077123456"), /format international/);
+test("numéros gabonais : toutes les écritures courantes donnent le même numéro", () => {
+  for (const v of ["+241 77 12 34 56", "+24177123456", "+241 077 12 34 56", "077 12 34 56", "77 12 34 56", "00241 77 12 34 56", "+241.77.12.34.56"]) {
+    assert.equal(normalizePhone(v), "+24177123456", v);
+  }
+  assert.equal(normalizePhone("+33 6 12 34 56 78"), "+33612345678"); // autres pays : inchangé
+  for (const bad of ["+241 77 12 34", "+241 77 12 34 56 7", "12345", "+241"]) assert.throws(() => normalizePhone(bad), /Exemple attendu/, bad);
+});
+
+test("un même numéro saisi autrement ne crée pas de doublon", async () => {
+  const p = await makeUser("Président Doublon");
+  const t = await createTontine(db, { ...base, actorUserId: p.id, name: "Groupe C" });
+  await addMember(db, { tontineId: t.id, actorUserId: p.id, name: "Sylvie Test", phone: "+241 066 00 00 55" });
+  await expectDomainError(addMember(db, { tontineId: t.id, actorUserId: p.id, name: "Sylvie Bis", phone: "66 00 00 55" }), "ALREADY_MEMBER");
+  assert.equal(await db.user.count({ where: { phoneNumber: "+24166000055" } }), 1);
 });
 
 test("parcours complet brouillon -> activation depuis l'interface", async () => {

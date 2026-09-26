@@ -1,17 +1,12 @@
 import type { Frequency, PayoutMode } from "../../generated/prisma/client";
 import type { Db } from "../db-types";
 import { DomainError, isUniqueViolation } from "../errors";
-import { tempEmailFor } from "../../lib/phone";
+import { tempEmailFor, normalizePhone as normalize } from "../../lib/phone";
 import { requireMember } from "./access";
 
-// Numéro saisi -> format international E.164. On n'ajoute ni ne retire aucun chiffre :
-// l'utilisateur tape le numéro complet, préfixe pays compris (+241 pré-rempli dans l'interface).
 export function normalizePhone(raw: string): string {
-  let p = raw.replace(/[\s.\-()]/g, "");
-  if (p.startsWith("00")) p = "+" + p.slice(2);
-  if (!/^\+[1-9]\d{7,14}$/.test(p)) {
-    throw new DomainError("INVALID_PHONE", "Numéro invalide : saisissez-le au format international, par exemple +241 suivi du numéro.");
-  }
+  const p = normalize(raw);
+  if (!p) throw new DomainError("INVALID_PHONE", "Numéro invalide. Exemple attendu : +241 77 12 34 56.");
   return p;
 }
 
